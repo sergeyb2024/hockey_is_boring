@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Air-Laser Pointer Canvas</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0f172a;
+            color: #f8fafc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 100vh;
+            padding: 16px;
+            touch-action: manipulation;
+        }
+        header { text-align: center; margin-top: 10px; }
+        h1 { font-size: 1.25rem; font-weight: 700; color: #38bdf8; }
+        p { font-size: 0.8rem; color: #94a3b8; margin-top: 4px; }
+        
+        #canvas-container {
+            position: relative;
+            width: 100%;
+            max-width: 380px;
+            aspect-ratio: 1;
+            background: #1e293b;
+            border: 2px solid #334155;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+        }
+        canvas { width: 100%; height: 100%; display: block; }
+        
+        #laser-dot {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #ef4444;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 12px #ef4444, 0 0 20px #ef4444;
+            pointer-events: none;
+            display: none;
+        }
+
+        .controls {
+            width: 100%;
+            max-width: 380px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .btn-group { display: flex; gap: 10px; }
+
+        button {
+            flex: 1;
+            padding: 14px;
+            font-size: 1rem;
+            font-weight: 600;
+            border-radius: 12px;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        button:active { transform: scale(0.97); }
+
+        #btn-toggle { background: #22c55e; color: #052e16; }
+        #btn-toggle.recording { background: #ef4444; color: #450a0a; }
+        #btn-clear { background: #475569; color: #f8fafc; }
+        #btn-copy { background: #0284c7; color: #f0f9ff; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        #status-bar {
+            font-size: 0.85rem;
+            text-align: center;
+            color: #cbd5e1;
+            height: 20px;
+        }
+
+        textarea {
+            width: 100%;
+            max-width: 380px;
+            height: 70px;
+            background: #1e293b;
+            color: #38bdf8;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 8px;
+            font-size: 0.75rem;
+            font-family: monospace;
+            resize: none;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Air-Laser Pointer</h1>
+        <p>Arm: 70cm | Offset: 10cm | Wall: 230cm</p>
+    </header>
+
+    <div id="canvas-container">
+        <canvas id="paintCanvas"></canvas>
+        <div id="laser-dot"></div>
+    </div>
+
+    <div id="status-bar">Tap "Start Drawing" to calibrate baseline</div>
+
+    <textarea id="json-output" readonly placeholder="JSON payload will appear here as fallback..."></textarea>
+
+    <div class="controls">
+        <button id="btn-toggle" onclick="toggleDrawing()">Start Drawing</button>
+        <div class="btn-group">
+            <button id="btn-clear" onclick="clearCanvas()">Clear</button>
+            <button id="btn-copy" onclick="copyJSON()" disabled>Copy JSON</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('paintCanvas');
+        const ctx = canvas.getContext('2d');
+        const laserDot = document.getElementById('laser-dot');
+        const toggleBtn = document.getElementById('btn-toggle');
+        const copyBtn = document.getElementById('btn-copy');
+        const clearBtn = document.getElementById('btn-clear');
+        const statusBar = document.getElementById('status-bar');
+        const jsonOutput = document.getElementById('json-output');
+
+        const ARM_LENGTH = 70;
+        const PALM_OFFSET = 10;
+        const WALL_DISTANCE = 230;
+        const TOTAL_RADIUS = ARM_LENGTH + PALM_OFFSET;
+
+        let isDrawing = false;
+        let baselineAngles = null;
+        let strokePoints = [];
+        let canvasWidth, canvasHeight;
+
+        function resizeCanvas() {
+            const rect = canvas.parentElement.getBoundingClientRect();
+            canvas.width = rect.width * window.devicePixelRatio;
+            canvas.height = rect.height * window.devicePixelRatio;
+            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            canvasWidth = rect.width;
+            canvasHeight = rect.height;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = '#38bdf8';
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        async function toggleDrawing() {
+            if (!isDrawing) {
+                if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    try {
+                        const permission = await DeviceOrientationEvent.requestPermission();
+                        if (permission !== 'granted') {
+                            alert('Sensor permission is required to track motion.');
+                            return;
+                        }
+                    } catch (e) {
+                        console.error(e);
+                    }
+                }
+
+                baselineAngles = null;
+                strokePoints = [];
+                isDrawing = true;
+                jsonOutput.style.display = 'none';
+                
+                window.addEventListener('deviceorientation', handleOrientation);
+                
+                toggleBtn.textContent = 'Stop & Copy JSON';
+                toggleBtn.classList.add('recording');
+                laserDot.style.display = 'block';
+                copyBtn.disabled = true;
+                statusBar.textContent = 'Drawing... Move your arm!';
+            } else {
+                // Stop Recording
+                isDrawing = false;
+                window.removeEventListener('deviceorientation', handleOrientation);
+                
+                toggleBtn.textContent = 'Start Drawing';
+                toggleBtn.classList.remove('recording');
+                laserDot.style.display = 'none';
+                
+                if (strokePoints.length > 0) {
+                    copyBtn.disabled = false;
+                    generateAndCopyJSON();
+                } else {
+                    statusBar.textContent = 'No motion recorded.';
+                }
+            }
+        }
+
+        function handleOrientation(event) {
+            if (!isDrawing || event.beta === null || event.gamma === null) return;
+
+            if (!baselineAngles) {
+                baselineAngles = { pitch: event.beta, yaw: event.gamma };
+                return;
+            }
+
+            const deltaPitch = (event.beta - baselineAngles.pitch) * (Math.PI / 180);
+            const deltaYaw = (event.gamma - baselineAngles.yaw) * (Math.PI / 180);
+
+            const wallX_cm = WALL_DISTANCE * Math.tan(deltaYaw);
+            const wallY_cm = WALL_DISTANCE * Math.tan(deltaPitch);
+
+            const scaleFactor = canvasWidth / 200; 
+            const pixelX = (canvasWidth / 2) + (wallX_cm * scaleFactor);
+            const pixelY = (canvasHeight / 2) - (wallY_cm * scaleFactor);
+
+            const clampedX = Math.max(0, Math.min(canvasWidth, pixelX));
+            const clampedY = Math.max(0, Math.min(canvasHeight, pixelY));
+
+            laserDot.style.left = `${clampedX}px`;
+            laserDot.style.top = `${clampedY}px`;
+
+            strokePoints.push({
+                timestamp: Date.now(),
+                angles: {
+                    pitch_deg: parseFloat((event.beta - baselineAngles.pitch).toFixed(2)),
+                    yaw_deg: parseFloat((event.gamma - baselineAngles.yaw).toFixed(2))
+                },
+                wallCoordinates_cm: {
+                    x: parseFloat(wallX_cm.toFixed(2)),
+                    y: parseFloat(wallY_cm.toFixed(2))
+                },
+                canvasPixels: { x: Math.round(clampedX), y: Math.round(clampedY) }
+            });
+
+            if (strokePoints.length > 1) {
+                const prevPixel = strokePoints[strokePoints.length - 2].canvasPixels;
+                ctx.beginPath();
+                ctx.moveTo(prevPixel.x, prevPixel.y);
+                ctx.lineTo(clampedX, clampedY);
+                ctx.stroke();
+            }
+        }
+
+        function buildPayload() {
+            return {
+                metadata: {
+                    exportedAt: new Date().toISOString(),
+                    geometryConfig: {
+                        armLength_cm: ARM_LENGTH,
+                        palmOffset_cm: PALM_OFFSET,
+                        totalRadius_cm: TOTAL_RADIUS,
+                        wallDistance_cm: WALL_DISTANCE
+                    },
+                    totalDataPoints: strokePoints.length
+                },
+                telemetry: strokePoints
+            };
+        }
+
+        async function generateAndCopyJSON() {
+            const payload = JSON.stringify(buildPayload(), null, 2);
+            jsonOutput.value = payload;
+
+            try {
+                await navigator.clipboard.writeText(payload);
+                statusBar.textContent = `Copied ${strokePoints.length} points to clipboard!`;
+                statusBar.style.color = '#38bdf8';
+            } catch (err) {
+                console.error('Clipboard write failed:', err);
+                jsonOutput.style.display = 'block';
+                statusBar.textContent = 'Auto-copy blocked; use text box below!';
+                statusBar.style.color = '#ef4444';
+            }
+        }
+
+        function copyJSON() {
+            jsonOutput.style.display = 'block';
+            jsonOutput.select();
+            navigator.clipboard.writeText(jsonOutput.value).then(() => {
+                statusBar.textContent = 'Manually copied to clipboard!';
+            });
+        }
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            strokePoints = [];
+            copyBtn.disabled = true;
+            jsonOutput.style.display = 'none';
+            statusBar.textContent = 'Canvas cleared.';
+        }
+    </script>
+</body>
+</html>
